@@ -24,7 +24,7 @@ except NameError:
 ARTIFACTS_DIR = BASE_DIR / "artifacts_3cls"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_PATH = Path("/content/drive/MyDrive/project_2nd/artifacts_3cls/resnet18_3cls_best.pth") # 구글드라이브에서 받아옴 
+MODEL_PATH = ARTIFACTS_DIR / "resnet18_3cls_best.pth"   # 구글드라이브에서 받아옴
 MAP_PATH   = ARTIFACTS_DIR / "class_to_idx.json"        # 레포에 포함(권장) 또는 드라이브에서 받기
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff", ".gif", ".jfif"}
@@ -56,34 +56,74 @@ def _sha256sum(p: Path) -> str:
 # =========================
 # 모델/라벨 준비 (다운로드 + 로드)
 # =========================
-
+def ensure_model_download():
+    """
+    모델(.pth) 파일이 없으면 Google Drive에서 자동 다운로드합니다.
+    디버그 가드 포함: 실제 에러 원인을 화면/사이드바에 표시.
+    """
     try:
-        import gdown
-    except ImportError:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown"])
-        import gdown
+        # ---- 디버그: 실행 환경/설정값 출력 ----
+        with st.sidebar.expander("🐞 DEBUG (env/paths)", expanded=False):
+            try:
+                has_secret = "MODEL_FILE_ID" in st.secrets
+            except Exception:
+                has_secret = False
+            st.write({
+                "cwd": os.getcwd(),
+                "python": sys.version,
+                "BASE_DIR": str(BASE_DIR),
+                "MODEL_PATH": str(MODEL_PATH),
+                "MAP_PATH": str(MAP_PATH),
+                "has_secret_MODEL_FILE_ID": has_secret,
+                "env_MODEL_FILE_ID": bool(os.getenv("MODEL_FILE_ID")),
+            })
 
-    url = f"https://drive.google.com/uc?id={MODEL_FILE_ID}&export=download"
-    tmp_path = MODEL_PATH.with_suffix(".downloading")
+        # ---- 이미 존재하면 OK ----
+        if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 0:
+            st.sidebar.success(f"모델 존재: {MODEL_PATH.name} ({MODEL_PATH.stat().st_size} bytes)")
+            return
 
-    with st.spinner("모델 다운로드 중... (Google Drive → gdown)"):
-        gdown.download(url, str(tmp_path), quiet=False)
+        MODEL_FILE_ID = _get_secret_or_env("MODEL_FILE_ID", "")
+        if not MODEL_FILE_ID:
+            raise RuntimeError(
+                "MODEL_FILE_ID가 비어 있습니다. (Settings→Secrets 또는 환경변수로 설정)"
+            )
 
-    if not tmp_path.exists() or tmp_path.stat().st_size == 0:
-        st.error("모델 다운로드 실패: 파일이 비어있거나 존재하지 않습니다. 공유 설정과 FILE_ID를 확인하세요.")
+        try:
+            import gdown
+        except ImportError:
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown"])
+            import gdown
+
+        url = f"https://drive.google.com/uc?id={MODEL_FILE_ID}&export=download"
+        tmp_path = MODEL_PATH.with_suffix(".downloading")
+
+        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)  # 디렉토리 보장
+
+        with st.spinner("모델 다운로드 중... (gdown)"):
+            st.sidebar.write("🐞 gdown url =", url)
+            gdown.download(url, str(tmp_path), quiet=False)
+
+        if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+            raise RuntimeError("모델 다운로드 실패: 파일이 비었거나 생성되지 않음 (공유권한/FILE_ID 확인)")
+
+        expected_hash = _get_secret_or_env("MODEL_SHA256", "")
+        if expected_hash:
+            got = _sha256sum(tmp_path)
+            if got.lower() != expected_hash.lower():
+                tmp_path.unlink(missing_ok=True)
+                raise RuntimeError(f"모델 해시 불일치: got={got} expected={expected_hash}")
+
+        tmp_path.rename(MODEL_PATH)
+        st.sidebar.success(f"모델 저장 완료: {MODEL_PATH} ({MODEL_PATH.stat().st_size} bytes)")
+
+    except Exception as e:
+        st.error(f"ensure_model_download() 실패: {type(e).__name__}: {e}")
+        st.info("체크: Settings→Secrets에 MODEL_FILE_ID가 정확한지, "
+                "드라이브 공유가 '링크가 있는 모든 사용자(보기)'인지, "
+                "requirements.txt에 gdown이 포함되어 있는지 확인하세요.")
         st.stop()
-
-    # (선택) 무결성 검증
-    expected_hash = _get_secret_or_env("MODEL_SHA256", "")
-    if expected_hash:
-        got = _sha256sum(tmp_path)
-        if got.lower() != expected_hash.lower():
-            tmp_path.unlink(missing_ok=True)
-            st.error("모델 해시 불일치: 업로드 파일/FILE_ID 또는 SHA256 값을 확인하세요.")
-            st.stop()
-
-    tmp_path.rename(MODEL_PATH)
 
 def ensure_label_map():
     """
@@ -199,8 +239,8 @@ st.set_page_config(page_title="Knife/Awl/Scissor Classifier", page_icon="🔎", 
 st.title("🔎 3-Class Classifier (ResNet)")
 st.caption("knife / awl / scissor — 확률 예측 데모")
 
-# ---- 디버그 패널 (필요시 사용) ----
-with st.sidebar.expander("🔍 Debug (secrets/env)", expanded=False):
+# ---- 추가 디버그 (선택) ----
+with st.sidebar.expander("🔍 Debug (secrets/env quick)", expanded=False):
     try:
         has_secret = "MODEL_FILE_ID" in st.secrets
     except Exception:
@@ -211,7 +251,7 @@ with st.sidebar.expander("🔍 Debug (secrets/env)", expanded=False):
     if MODEL_PATH.exists():
         st.write("MODEL_PATH size:", MODEL_PATH.stat().st_size)
 
-# ---- (옵션) 임시 입력: Secrets 없이 테스트할 때 사용 후 삭제 권장 ----
+# ---- (옵션) 임시 입력: Secrets 없이 테스트할 때 사용 후 제거 권장 ----
 if _get_secret_or_env("MODEL_FILE_ID", "") == "":
     with st.sidebar.expander("⚠️ Set MODEL_FILE_ID (temp)", expanded=False):
         tmp_id = st.text_input("Google Drive FILE_ID")
@@ -274,4 +314,3 @@ with tab2:
                 file_name="infer_results.csv",
                 mime="text/csv",
             )
-
