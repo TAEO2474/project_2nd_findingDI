@@ -12,10 +12,8 @@ import streamlit as st
 import pandas as pd
 
 # =========================
-# 기본 경로/전처리 설정
+# 경로/전처리
 # =========================
-# - 일반 실행: __file__ 기준
-# - Colab/Jupyter: __file__ 미존재 → os.getcwd() 기준
 try:
     BASE_DIR = Path(__file__).resolve().parent
 except NameError:
@@ -24,8 +22,8 @@ except NameError:
 ARTIFACTS_DIR = BASE_DIR / "artifacts_3cls"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_PATH = ARTIFACTS_DIR / "resnet18_3cls_best.pth"   # 구글드라이브에서 받아옴
-MAP_PATH   = ARTIFACTS_DIR / "class_to_idx.json"        # 레포에 포함(권장) 또는 드라이브에서 받기
+MODEL_PATH = ARTIFACTS_DIR / "resnet18_3cls_best.pth"
+MAP_PATH   = ARTIFACTS_DIR / "class_to_idx.json"
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff", ".gif", ".jfif"}
 MEAN = (0.485, 0.456, 0.406)
@@ -37,8 +35,20 @@ INFER_TF = transforms.Compose([
     transforms.Normalize(MEAN, STD),
 ])
 
+# =========================
+# 내장 라벨맵(파일 없을 때 자동 생성용)
+# 학습 시 사용한 매핑과 동일해야 합니다!
+# =========================
+EMBEDDED_CLASS_TO_IDX = {
+    "awl": 0,
+    "knife": 1,
+    "scissor": 2,
+}
+
+# =========================
+# 유틸
+# =========================
 def _get_secret_or_env(key: str, default: str = "") -> str:
-    # st.secrets 우선, 없으면 환경변수, 둘 다 없으면 default
     try:
         if key in st.secrets:
             return str(st.secrets[key]).strip()
@@ -54,15 +64,11 @@ def _sha256sum(p: Path) -> str:
     return h.hexdigest()
 
 # =========================
-# 모델/라벨 준비 (다운로드 + 로드)
+# 다운로드/확보
 # =========================
 def ensure_model_download():
-    """
-    모델(.pth) 파일이 없으면 Google Drive에서 자동 다운로드합니다.
-    디버그 가드 포함: 실제 에러 원인을 화면/사이드바에 표시.
-    """
+    """모델(.pth)이 없으면 Google Drive에서 gdown으로 다운로드 (Secrets/ENV: MODEL_FILE_ID)."""
     try:
-        # ---- 디버그: 실행 환경/설정값 출력 ----
         with st.sidebar.expander("🐞 DEBUG (env/paths)", expanded=False):
             try:
                 has_secret = "MODEL_FILE_ID" in st.secrets
@@ -78,16 +84,13 @@ def ensure_model_download():
                 "env_MODEL_FILE_ID": bool(os.getenv("MODEL_FILE_ID")),
             })
 
-        # ---- 이미 존재하면 OK ----
         if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 0:
             st.sidebar.success(f"모델 존재: {MODEL_PATH.name} ({MODEL_PATH.stat().st_size} bytes)")
             return
 
         MODEL_FILE_ID = _get_secret_or_env("MODEL_FILE_ID", "")
         if not MODEL_FILE_ID:
-            raise RuntimeError(
-                "MODEL_FILE_ID가 비어 있습니다. (Settings→Secrets 또는 환경변수로 설정)"
-            )
+            raise RuntimeError("MODEL_FILE_ID가 비어 있습니다. (Settings→Secrets 또는 환경변수로 설정)")
 
         try:
             import gdown
@@ -98,8 +101,7 @@ def ensure_model_download():
 
         url = f"https://drive.google.com/uc?id={MODEL_FILE_ID}&export=download"
         tmp_path = MODEL_PATH.with_suffix(".downloading")
-
-        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)  # 디렉토리 보장
+        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
         with st.spinner("모델 다운로드 중... (gdown)"):
             st.sidebar.write("🐞 gdown url =", url)
@@ -120,49 +122,52 @@ def ensure_model_download():
 
     except Exception as e:
         st.error(f"ensure_model_download() 실패: {type(e).__name__}: {e}")
-        st.info("체크: Settings→Secrets에 MODEL_FILE_ID가 정확한지, "
-                "드라이브 공유가 '링크가 있는 모든 사용자(보기)'인지, "
-                "requirements.txt에 gdown이 포함되어 있는지 확인하세요.")
+        st.info("체크: Secrets의 MODEL_FILE_ID, 드라이브 공유(링크 있는 모든 사용자), requirements.txt의 gdown")
         st.stop()
 
 def ensure_label_map():
     """
-    class_to_idx.json 확보.
-    1) 레포/이미지에 포함되어 있으면 그대로 사용 (권장: artifacts_3cls/class_to_idx.json 커밋)
-    2) 없으면 Google Drive에서 받아오기 (MAP_FILE_ID 필요)
+    class_to_idx.json 확보 우선순위:
+    1) 파일이 이미 있으면 사용
+    2) MAP_FILE_ID가 있으면 드라이브에서 다운로드
+    3) 둘 다 아니면 EMBEDDED_CLASS_TO_IDX로 파일 생성
     """
     if MAP_PATH.exists() and MAP_PATH.stat().st_size > 0:
         return
 
     MAP_FILE_ID = _get_secret_or_env("MAP_FILE_ID", "")
-    if not MAP_FILE_ID:
-        st.error(
-            "`class_to_idx.json`이 없습니다.\n\n"
-            f"- 기대 경로: {MAP_PATH}\n"
-            "- 파일을 리포에 포함시키거나, Google Drive FILE_ID를 secrets/env로 설정하세요.\n"
-            "  · 환경변수: MAP_FILE_ID (옵션)\n"
-            "  · Streamlit secrets: MAP_FILE_ID (옵션)"
-        )
-        st.stop()
+    if MAP_FILE_ID:
+        try:
+            import gdown
+        except ImportError:
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown"])
+            import gdown
 
+        url = f"https://drive.google.com/uc?id={MAP_FILE_ID}&export=download"
+        with st.spinner("라벨 맵 다운로드 중... (gdown)"):
+            gdown.download(url, str(MAP_PATH), quiet=False)
+
+        if MAP_PATH.exists() and MAP_PATH.stat().st_size > 0:
+            return
+        else:
+            st.warning("MAP_FILE_ID 다운로드 실패. 내장 라벨맵으로 생성합니다.")
+
+    # 내장 라벨맵으로 파일 생성
     try:
-        import gdown
-    except ImportError:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown"])
-        import gdown
-
-    url = f"https://drive.google.com/uc?id={MAP_FILE_ID}&export=download"
-    with st.spinner("라벨 맵 다운로드 중... (gdown)"):
-        gdown.download(url, str(MAP_PATH), quiet=False)
-
-    if not MAP_PATH.exists() or MAP_PATH.stat().st_size == 0:
-        st.error("라벨 맵 다운로드 실패: 공유 설정과 MAP_FILE_ID를 확인하세요.")
+        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(MAP_PATH, "w", encoding="utf-8") as f:
+            json.dump(EMBEDDED_CLASS_TO_IDX, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"class_to_idx.json 생성 실패: {e}")
         st.stop()
 
+# =========================
+# 로드
+# =========================
 @st.cache_resource
 def load_model_and_labels(arch: str = "resnet18"):
-    """모델 가중치와 클래스 매핑을 로드하고, (model, idx_to_class, class_to_idx)를 반환합니다."""
+    """(model, idx_to_class, class_to_idx) 반환."""
     ensure_model_download()
     ensure_label_map()
 
@@ -174,11 +179,10 @@ def load_model_and_labels(arch: str = "resnet18"):
         st.error(f"class_to_idx.json 로드 실패: {e}")
         st.stop()
 
-    # idx->class 매핑
     idx_to_class = {v: k for k, v in class_to_idx.items()}
     num_classes = len(idx_to_class)
 
-    # 백본 구성 (학습 때와 동일해야 합니다)
+    # 백본 구성 (학습과 동일)
     if arch == "resnet18":
         backbone = models.resnet18(weights=None)
     elif arch == "resnet50":
@@ -187,16 +191,11 @@ def load_model_and_labels(arch: str = "resnet18"):
         raise ValueError("Unsupported arch (resnet18|resnet50)")
 
     in_features = backbone.fc.in_features
-
-    # ⚠️ 학습 시 MLP 헤드를 썼다면 동일 구조로 맞춰야 함.
-    # 현재는 단일 Linear로 가정 (저장된 state_dict와 일치해야 함)
-    backbone.fc = nn.Linear(in_features, num_classes)
+    backbone.fc = nn.Linear(in_features, num_classes)  # 헤드 구조가 학습과 동일해야 함
 
     # 가중치 로드
     try:
         state = torch.load(MODEL_PATH, map_location="cpu")
-
-        # 형태 판별: 순수 state_dict or {"state_dict": ...} or whole model
         if isinstance(state, dict) and "state_dict" in state and isinstance(state["state_dict"], dict):
             backbone.load_state_dict(state["state_dict"], strict=True)
         elif isinstance(state, dict) and all(
@@ -206,7 +205,6 @@ def load_model_and_labels(arch: str = "resnet18"):
         ):
             backbone.load_state_dict(state, strict=True)
         else:
-            # 전체 모델 저장본일 가능성
             try:
                 backbone = state
                 if hasattr(backbone, "eval"):
@@ -215,7 +213,6 @@ def load_model_and_labels(arch: str = "resnet18"):
                     raise RuntimeError("불지원 형식: 전체 모델 객체가 아님")
             except Exception as e:
                 raise RuntimeError(f"지원하지 않는 모델 저장 형식입니다: {e}")
-
     except Exception as e:
         st.error(f"모델 가중치 로드 실패: {e}")
         st.stop()
@@ -233,13 +230,12 @@ def predict_one(img: Image.Image, model: torch.nn.Module, device, idx_to_class: 
     return items, prob
 
 # =========================
-# Streamlit UI
+# UI
 # =========================
 st.set_page_config(page_title="Knife/Awl/Scissor Classifier", page_icon="🔎", layout="centered")
 st.title("🔎 3-Class Classifier (ResNet)")
 st.caption("knife / awl / scissor — 확률 예측 데모")
 
-# ---- 추가 디버그 (선택) ----
 with st.sidebar.expander("🔍 Debug (secrets/env quick)", expanded=False):
     try:
         has_secret = "MODEL_FILE_ID" in st.secrets
@@ -250,8 +246,19 @@ with st.sidebar.expander("🔍 Debug (secrets/env quick)", expanded=False):
     st.write("MODEL_PATH exists:", MODEL_PATH.exists())
     if MODEL_PATH.exists():
         st.write("MODEL_PATH size:", MODEL_PATH.stat().st_size)
+with st.sidebar.expander("🔍 Label map check", expanded=False):
+    st.write("MAP_PATH:", str(MAP_PATH))
+    st.write("MAP exists:", MAP_PATH.exists())
+    if MAP_PATH.exists():
+        st.write("MAP size:", MAP_PATH.stat().st_size)
+        try:
+            with open(MAP_PATH, "r", encoding="utf-8") as f:
+                jm = json.load(f)
+            st.success(f"class_to_idx loaded. num_classes = {len(jm)} → keys: {list(jm.keys())}")
+        except Exception as e:
+            st.error(f"Failed to read class_to_idx.json: {e}")
 
-# ---- (옵션) 임시 입력: Secrets 없이 테스트할 때 사용 후 제거 권장 ----
+# (옵션) Secrets 없이 테스트 시 임시 입력
 if _get_secret_or_env("MODEL_FILE_ID", "") == "":
     with st.sidebar.expander("⚠️ Set MODEL_FILE_ID (temp)", expanded=False):
         tmp_id = st.text_input("Google Drive FILE_ID")
@@ -297,7 +304,6 @@ with tab2:
                 items, prob = predict_one(img, model, device, idx_to_class)
                 top1 = items[0]
                 row = {"filename": f.name, "pred": top1[0], "conf": top1[1]}
-                # 고정 순서: class_to_idx의 인덱스 순
                 for cls in sorted(class_to_idx, key=lambda k: class_to_idx[k]):
                     idx = class_to_idx[cls]
                     row[f"p_{cls}"] = float(prob[idx])
