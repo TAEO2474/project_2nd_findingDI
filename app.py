@@ -1,4 +1,4 @@
-#%%writefile app.py
+# %%writefile app.py
 import os, json, sys, hashlib
 from pathlib import Path
 
@@ -14,13 +14,18 @@ import pandas as pd
 # =========================
 # 기본 경로/전처리 설정
 # =========================
-# 배포 환경에서 안전한 기준 경로(파일 위치 기준)
-BASE_DIR = Path(__file__).resolve().parent
+# - 일반 실행: __file__ 기준
+# - Colab/Jupyter: __file__ 미존재 → os.getcwd() 기준
+try:
+    BASE_DIR = Path(__file__).resolve().parent
+except NameError:
+    BASE_DIR = Path(os.getcwd()).resolve()
+
 ARTIFACTS_DIR = BASE_DIR / "artifacts_3cls"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 MODEL_PATH = ARTIFACTS_DIR / "resnet18_3cls_best.pth"   # 구글드라이브에서 받아옴
-MAP_PATH   = ARTIFACTS_DIR / "class_to_idx.json"        # 레포에 있거나(권장), 필요 시 드라이브에서 받기
+MAP_PATH   = ARTIFACTS_DIR / "class_to_idx.json"        # 레포에 포함(권장) 또는 드라이브에서 받기
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff", ".gif", ".jfif"}
 MEAN = (0.485, 0.456, 0.406)
@@ -54,7 +59,7 @@ def _sha256sum(p: Path) -> str:
 def ensure_model_download():
     """
     모델(.pth) 파일이 없으면 Google Drive에서 자동 다운로드합니다.
-    - FILE_ID는 st.secrets["MODEL_FILE_ID"] 또는 환경변수 MODEL_FILE_ID 로 주입 권장
+    - FILE_ID는 st.secrets['MODEL_FILE_ID'] 또는 환경변수 MODEL_FILE_ID 로 주입 권장
     - 드라이브 공유 설정: '링크가 있는 모든 사용자 보기/다운로드'
     - (선택) MODEL_SHA256 으로 무결성 검증 가능
     """
@@ -75,7 +80,6 @@ def ensure_model_download():
     try:
         import gdown
     except ImportError:
-        # 배포 환경에서 requirements로 설치되지만, 혹시 모를 로컬 대비
         import subprocess
         subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown"])
         import gdown
@@ -171,19 +175,27 @@ def load_model_and_labels(arch: str = "resnet18"):
     # 가중치 로드
     try:
         state = torch.load(MODEL_PATH, map_location="cpu")
-        # state가 전체 모델인지, state_dict인지에 따라 다를 수 있음 → 보완 로직
-        if isinstance(state, dict) and all(k.startswith(("conv", "bn", "layer", "fc")) or "num_batches_tracked" in k for k in state.keys()):
-            # 순수 state_dict로 추정
-            backbone.load_state_dict(state, strict=True)
-        elif isinstance(state, dict) and "state_dict" in state:
+
+        # 형태 판별: 순수 state_dict or {"state_dict": ...} or whole model
+        if isinstance(state, dict) and "state_dict" in state and isinstance(state["state_dict"], dict):
             backbone.load_state_dict(state["state_dict"], strict=True)
+        elif isinstance(state, dict) and all(
+            isinstance(k, str) and (
+                k.startswith(("conv", "bn", "layer", "fc")) or "num_batches_tracked" in k
+            ) for k in state.keys()
+        ):
+            backbone.load_state_dict(state, strict=True)
         else:
-            # 전체 모델 저장본일 가능성 → 시도
+            # 전체 모델 저장본일 가능성
             try:
                 backbone = state
-                backbone.eval()
+                if hasattr(backbone, "eval"):
+                    backbone.eval()
+                else:
+                    raise RuntimeError("불지원 형식: 전체 모델 객체가 아님")
             except Exception as e:
                 raise RuntimeError(f"지원하지 않는 모델 저장 형식입니다: {e}")
+
     except Exception as e:
         st.error(f"모델 가중치 로드 실패: {e}")
         st.stop()
@@ -206,6 +218,26 @@ def predict_one(img: Image.Image, model: torch.nn.Module, device, idx_to_class: 
 st.set_page_config(page_title="Knife/Awl/Scissor Classifier", page_icon="🔎", layout="centered")
 st.title("🔎 3-Class Classifier (ResNet)")
 st.caption("knife / awl / scissor — 확률 예측 데모")
+
+# ---- 디버그 패널 (필요시 사용) ----
+with st.sidebar.expander("🔍 Debug (secrets/env)", expanded=False):
+    try:
+        has_secret = "MODEL_FILE_ID" in st.secrets
+    except Exception:
+        has_secret = False
+    st.write("has st.secrets['MODEL_FILE_ID']:", has_secret)
+    st.write("env MODEL_FILE_ID set:", bool(os.getenv("MODEL_FILE_ID")))
+    st.write("MODEL_PATH exists:", MODEL_PATH.exists())
+    if MODEL_PATH.exists():
+        st.write("MODEL_PATH size:", MODEL_PATH.stat().st_size)
+
+# ---- (옵션) 임시 입력: Secrets 없이 테스트할 때 사용 후 삭제 권장 ----
+if _get_secret_or_env("MODEL_FILE_ID", "") == "":
+    with st.sidebar.expander("⚠️ Set MODEL_FILE_ID (temp)", expanded=False):
+        tmp_id = st.text_input("Google Drive FILE_ID")
+        if tmp_id:
+            os.environ["MODEL_FILE_ID"] = tmp_id
+            st.success("MODEL_FILE_ID set for this session. Rerun the app (⌘/Ctrl+R).")
 
 with st.spinner("모델 로딩 중..."):
     model, idx_to_class, class_to_idx = load_model_and_labels(arch="resnet18")
