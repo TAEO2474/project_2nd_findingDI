@@ -1,10 +1,8 @@
-streamlit
-torch
-torchvision
-torchaudio
-scikit-learn
-pandas
+
+streamlit>=1.31
+torch>=2.1
+torchvision>=0.16
 numpy
-matplotlib
 Pillow
-gdown
+pandas
+gdown>=5.2.0
