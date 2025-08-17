@@ -24,7 +24,7 @@ except NameError:
 ARTIFACTS_DIR = BASE_DIR / "artifacts_3cls"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_PATH = ARTIFACTS_DIR / "resnet18_3cls_best.pth"   # 구글드라이브에서 받아옴
+MODEL_PATH = Path("/content/drive/MyDrive/project_2nd/artifacts_3cls/resnet18_3cls_best.pth") # 구글드라이브에서 받아옴 
 MAP_PATH   = ARTIFACTS_DIR / "class_to_idx.json"        # 레포에 포함(권장) 또는 드라이브에서 받기
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff", ".gif", ".jfif"}
@@ -56,26 +56,6 @@ def _sha256sum(p: Path) -> str:
 # =========================
 # 모델/라벨 준비 (다운로드 + 로드)
 # =========================
-def ensure_model_download():
-    """
-    모델(.pth) 파일이 없으면 Google Drive에서 자동 다운로드합니다.
-    - FILE_ID는 st.secrets['MODEL_FILE_ID'] 또는 환경변수 MODEL_FILE_ID 로 주입 권장
-    - 드라이브 공유 설정: '링크가 있는 모든 사용자 보기/다운로드'
-    - (선택) MODEL_SHA256 으로 무결성 검증 가능
-    """
-    if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 0:
-        return
-
-    MODEL_FILE_ID = _get_secret_or_env("MODEL_FILE_ID", "")
-    if not MODEL_FILE_ID:
-        st.error(
-            "모델(.pth) 파일이 없습니다.\n\n"
-            f"- 기대 경로: {MODEL_PATH}\n"
-            "- Google Drive FILE_ID를 환경변수 또는 Secrets에 설정하세요.\n"
-            "  · 환경변수: MODEL_FILE_ID\n"
-            "  · Streamlit secrets: MODEL_FILE_ID"
-        )
-        st.stop()
 
     try:
         import gdown
@@ -294,3 +274,4 @@ with tab2:
                 file_name="infer_results.csv",
                 mime="text/csv",
             )
+
