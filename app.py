@@ -280,7 +280,7 @@ with tab1:
     if up is not None:
         try:
             img = Image.open(up).convert("RGB")
-            st.image(img, caption="입력 이미지", use_column_width=True)
+            st.image(img, caption="입력 이미지", use_container_width=True)
             items, prob = predict_one(img, model, device, idx_to_class)
 
             df = pd.DataFrame([{"class": c, "prob": p} for c, p in items])
